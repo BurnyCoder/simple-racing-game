@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Racing Game</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden; /* Prevent scrollbars */
+            background-color: #222; /* Dark background */
+            color: #fff;
+            font-family: 'Press Start 2P', cursive; /* Game font */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            flex-direction: column; /* Stack canvas and controls */
+        }
+        #gameCanvas {
+            display: block; /* Remove extra space below canvas */
+            width: 90vw; /* Responsive width */
+            max-width: 1000px; /* Max width */
+            height: 60vh; /* Responsive height */
+            background-color: #555; /* Canvas background fallback */
+            border-radius: 8px; /* Rounded corners */
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+            cursor: grab; /* Indicate draggable camera */
+        }
+        #gameCanvas:active {
+             cursor: grabbing;
+        }
+        .controls {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: rgba(0, 0, 0, 0.5);
+            border-radius: 8px;
+            text-align: center;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+        }
+        .controls p {
+            margin: 5px 0;
+            font-size: 0.9em;
+        }
+        .controls span {
+            display: inline-block;
+            background-color: #444;
+            padding: 5px 10px;
+            border-radius: 4px;
+            margin: 0 5px;
+            box-shadow: inset 0 2px 4px rgba(0,0,0,0.4);
+        }
+        /* Basic styling using Tailwind classes in body */
+    </style>
+</head>
+<body class="bg-gray-900 text-white flex flex-col items-center justify-center min-h-screen p-4">
+
+    <h1 class="text-3xl mb-4 font-bold">3D Racer</h1>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <div class="controls mt-4 p-4 bg-gray-800 rounded-lg shadow-lg text-center">
+        <p>Controls:</p>
+        <p><span>W</span> / <span>&uarr;</span> : Accelerate</p>
+        <p><span>S</span> / <span>&darr;</span> : Brake / Reverse</p>
+        <p><span>A</span> / <span>&larr;</span> : Steer Left</p>
+        <p><span>D</span> / <span>&rarr;</span> : Steer Right</p>
+        <p><span>Mouse Drag</span> : Rotate Camera</p>
+    </div>
+
+    <script>
+        let scene, camera, renderer;
+        let car, track;
+        let keys = {};
+        let carSpeed = 0;
+        let steerAngle = 0;
+        const maxSpeed = 0.8;
+        const acceleration = 0.01;
+        const deceleration = 0.005;
+        const braking = 0.02;
+        const reverseSpeed = -0.1;
+        // --- Reduced Steering Speed ---
+        const steerSpeed = 0.015; // Reduced from 0.03 for less aggressive steering
+        // ---
+        const maxSteer = Math.PI / 6;
+        const wheelBase = 2.5;
+
+        // Camera variables
+        let cameraOffset = new THREE.Vector3(0, 8, -15);
+        let isMouseDown = false;
+        let previousMousePosition = { x: 0, y: 0 };
+
+        // Track parameters for rounded rectangle
+        const trackLength = 100; // Length of the straight sections
+        const trackCurveRadius = 30; // Radius of the curved ends
+        const trackWidth = 16; // Width of the track surface
+
+        // Calculated dimensions for shape generation
+        const outerWidth = trackCurveRadius * 2; // Width of the curved ends (outer)
+        const innerWidth = outerWidth - trackWidth * 2;
+        const innerCurveRadius = trackCurveRadius - trackWidth;
+
+        // Initialize the game
+        function init() {
+            console.log("Initializing game...");
+
+            // Scene setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB);
+            scene.fog = new THREE.Fog(0x87CEEB, 100, 250);
+
+            // Camera setup
+            const canvas = document.getElementById('gameCanvas');
+            if (!canvas) {
+                console.error("FATAL: Canvas element #gameCanvas not found!");
+                throw new Error("Canvas element #gameCanvas not found!");
+            }
+            camera = new THREE.PerspectiveCamera(75, 1, 0.1, 1000); // Initial aspect ratio
+
+            // Renderer setup
+            try {
+                renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+            } catch (e) {
+                console.error("FATAL: Failed to create WebGLRenderer:", e);
+                throw e;
+            }
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+            // Lighting
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
+            directionalLight.position.set(50, 50, 30);
+            directionalLight.castShadow = true;
+            directionalLight.shadow.mapSize.width = 2048;
+            directionalLight.shadow.mapSize.height = 2048;
+            const shadowCamSize = Math.max(trackLength, outerWidth) * 1.5;
+            directionalLight.shadow.camera.near = 0.5;
+            directionalLight.shadow.camera.far = 150;
+            directionalLight.shadow.camera.left = -shadowCamSize / 2;
+            directionalLight.shadow.camera.right = shadowCamSize / 2;
+            directionalLight.shadow.camera.top = shadowCamSize / 2;
+            directionalLight.shadow.camera.bottom = -shadowCamSize / 2;
+            directionalLight.shadow.camera.updateProjectionMatrix();
+            scene.add(directionalLight);
+
+            // --- Track Creation using ShapeGeometry ---
+            createTrack();
+
+            // Car model
+            const carGeometry = new THREE.BoxGeometry(2, 1, 4);
+            const carMaterial = new THREE.MeshStandardMaterial({ color: 0xff0000 });
+            car = new THREE.Mesh(carGeometry, carMaterial);
+            const carYPosition = (track ? track.position.y : 0) + 0.5;
+            car.position.set(0, carYPosition, trackCurveRadius);
+            car.rotation.y = 0;
+            car.castShadow = true;
+            scene.add(car);
+
+            // Set initial camera position relative to the car
+            camera.position.copy(car.position).add(cameraOffset);
+            camera.lookAt(car.position);
+
+            // Event Listeners
+            window.addEventListener('keydown', handleKeyDown);
+            window.addEventListener('keyup', handleKeyUp);
+            canvas.addEventListener('mousedown', handleMouseDown);
+            window.addEventListener('mouseup', handleMouseUp);
+            window.addEventListener('mousemove', handleMouseMove);
+            window.addEventListener('resize', onWindowResize);
+
+            // Call onWindowResize once initially
+            onWindowResize();
+
+            console.log("Initialization complete.");
+        }
+
+        // Function to create the track geometry using ShapeGeometry (unchanged)
+        function createTrack() {
+            console.log("Creating track using ShapeGeometry...");
+            try {
+                const outerShape = new THREE.Shape();
+                const halfLength = trackLength / 2;
+                const radius = trackCurveRadius;
+                outerShape.moveTo(-halfLength, radius);
+                outerShape.absarc( -halfLength, 0, radius, Math.PI * 0.5, Math.PI * 1.5, false );
+                outerShape.lineTo( halfLength, -radius);
+                outerShape.absarc( halfLength, 0, radius, Math.PI * 1.5, Math.PI * 0.5, false );
+                outerShape.lineTo(-halfLength, radius);
+                const innerRadius = radius - trackWidth;
+                if (innerRadius <= 0) {
+                    console.error("Track width is too large for the curve radius, inner radius is zero or negative.");
+                    throw new Error("Invalid track dimensions for ShapeGeometry hole.");
+                }
+                const innerHole = new THREE.Path();
+                innerHole.moveTo(-halfLength, innerRadius);
+                innerHole.absarc( -halfLength, 0, innerRadius, Math.PI * 0.5, Math.PI * 1.5, false );
+                innerHole.lineTo( halfLength, -innerRadius);
+                innerHole.absarc( halfLength, 0, innerRadius, Math.PI * 1.5, Math.PI * 0.5, false );
+                innerHole.lineTo(-halfLength, innerRadius);
+                outerShape.holes.push(innerHole);
+                const trackGeometry = new THREE.ShapeGeometry(outerShape, 32);
+                const trackMaterial = new THREE.MeshStandardMaterial({ color: 0x444444, side: THREE.DoubleSide });
+                track = new THREE.Mesh(trackGeometry, trackMaterial);
+                track.rotation.x = -Math.PI / 2;
+                track.position.y = -0.01;
+                track.receiveShadow = true;
+                scene.add(track);
+                console.log("Track created successfully using ShapeGeometry.");
+            } catch (error) {
+                 console.error("Error creating track geometry:", error);
+                 console.warn("Falling back to simple PlaneGeometry for ground.");
+                 const groundGeometry = new THREE.PlaneGeometry(200, 200);
+                 const groundMaterial = new THREE.MeshStandardMaterial({ color: 0x556B2F, side: THREE.DoubleSide });
+                 track = new THREE.Mesh(groundGeometry, groundMaterial);
+                 track.rotation.x = -Math.PI / 2;
+                 track.position.y = -0.1;
+                 track.receiveShadow = true;
+                 scene.add(track);
+            }
+        }
+
+        // Handle key down/up events (unchanged)
+        function handleKeyDown(event) { keys[event.key.toLowerCase()] = true; keys[event.code] = true; }
+        function handleKeyUp(event) { keys[event.key.toLowerCase()] = false; keys[event.code] = false; }
+
+        // Handle mouse events (unchanged)
+        function handleMouseDown(event) {
+            if (event.target.id === 'gameCanvas') {
+                 isMouseDown = true;
+                 previousMousePosition.x = event.clientX;
+                 previousMousePosition.y = event.clientY;
+                 document.getElementById('gameCanvas').style.cursor = 'grabbing';
+            }
+        }
+        function handleMouseUp(event) {
+            if (isMouseDown) {
+                isMouseDown = false;
+                document.getElementById('gameCanvas').style.cursor = 'grab';
+            }
+        }
+        function handleMouseMove(event) {
+            if (!isMouseDown) return;
+            const deltaX = event.clientX - previousMousePosition.x;
+            const rotationSpeed = 0.005;
+            const horizontalAngle = -deltaX * rotationSpeed;
+            let worldOffset = cameraOffset.clone().applyQuaternion(car.quaternion);
+            worldOffset.applyAxisAngle(new THREE.Vector3(0, 1, 0), horizontalAngle);
+            cameraOffset.copy(worldOffset).applyQuaternion(car.quaternion.clone().invert());
+            previousMousePosition.x = event.clientX;
+            previousMousePosition.y = event.clientY;
+        }
+
+        // Update car physics and position (uses new steerSpeed)
+        function updateCar() {
+             if (!car || !track) return;
+            let accelerating = keys['w'] || keys['ArrowUp'];
+            let brakingOrReversing = keys['s'] || keys['ArrowDown'];
+            let steerLeft = keys['a'] || keys['ArrowLeft'];
+            let steerRight = keys['d'] || keys['ArrowRight'];
+
+            // --- Basic Physics Update --- (Unchanged)
+            if (accelerating) carSpeed = Math.min(maxSpeed, carSpeed + acceleration);
+            else if (brakingOrReversing) {
+                if (carSpeed > 0) carSpeed = Math.max(0, carSpeed - braking);
+                else if (Math.abs(carSpeed) < 0.01) carSpeed = Math.max(reverseSpeed, carSpeed - acceleration * 0.5);
+                else carSpeed = Math.min(0, carSpeed + deceleration);
+            } else {
+                if (carSpeed > 0) carSpeed = Math.max(0, carSpeed - deceleration);
+                else if (carSpeed < 0) carSpeed = Math.min(0, carSpeed + deceleration);
+            }
+
+            // Steering (Uses updated steerSpeed)
+            let steerInput = (steerLeft ? 1 : 0) - (steerRight ? 1 : 0);
+            const steerReturnFactor = 1.5;
+            // Steering effectiveness depends on speed relative to maxSpeed
+            const turnSpeedFactor = Math.min(1, Math.abs(carSpeed) / (maxSpeed * 0.5));
+            // Update steerAngle based on input, steerSpeed, and turnSpeedFactor
+            if (steerInput !== 0) steerAngle += steerInput * steerSpeed * turnSpeedFactor;
+            else { // Return steering wheel to center
+                if (steerAngle > steerSpeed) steerAngle -= steerSpeed * steerReturnFactor; // Faster return
+                else if (steerAngle < -steerSpeed) steerAngle += steerSpeed * steerReturnFactor;
+                else steerAngle = 0;
+            }
+            // Clamp steering angle
+            steerAngle = Math.max(-maxSteer, Math.min(maxSteer, steerAngle));
+
+            // --- Update Position and Rotation --- (Unchanged)
+            if (Math.abs(carSpeed) > 0.001) {
+                 const tanSteer = Math.tan(steerAngle);
+                 if (Math.abs(tanSteer) > 1e-4) {
+                    const turnRadius = wheelBase / tanSteer;
+                    if (Math.abs(turnRadius) > 0.1 && Math.abs(turnRadius) < 1000) {
+                         const turnAngle = carSpeed / turnRadius;
+                         car.rotation.y += turnAngle;
+                    }
+                 }
+            }
+
+            // Move car (Unchanged)
+            const direction = new THREE.Vector3(0, 0, 1).applyQuaternion(car.quaternion);
+            car.position.addScaledVector(direction, carSpeed);
+
+            // Adjust car height to stay on track surface
+            car.position.y = (track ? track.position.y : 0) + 0.5;
+
+            // --- Boundary check removed ---
+        }
+
+        // Update camera position (unchanged)
+        function updateCameraPosition() {
+             if (!car) return;
+            const desiredPosition = car.position.clone().add(cameraOffset.clone().applyQuaternion(car.quaternion));
+            camera.position.lerp(desiredPosition, 0.1);
+            camera.lookAt(car.position);
+        }
+
+        // Handle window resize (unchanged)
+        function onWindowResize() {
+            const canvas = document.getElementById('gameCanvas');
+            if (!canvas) return;
+            const width = canvas.clientWidth;
+            const height = canvas.clientHeight;
+            if (width > 0 && height > 0) {
+                camera.aspect = width / height;
+                camera.updateProjectionMatrix();
+                renderer.setSize(width, height);
+                console.log(`Resized renderer to ${width} x ${height}`);
+            } else {
+                console.warn(`onWindowResize called with zero dimensions: ${width} x ${height}`);
+            }
+        }
+
+        // Animation loop (unchanged)
+        function animate() {
+            requestAnimationFrame(animate);
+            updateCar();
+            updateCameraPosition();
+            if (renderer && scene && camera) {
+                renderer.render(scene, camera);
+            }
+        }
+
+        // Start the game (unchanged)
+        window.onload = function() {
+            try {
+                init();
+                animate();
+            } catch (error) {
+                console.error("Error initializing or running the game:", error);
+                const errorDiv = document.createElement('div');
+                errorDiv.style.cssText = 'color: red; margin-top: 20px; padding: 10px; border: 1px solid red; background-color: rgba(255,0,0,0.1);';
+                const errorMessage = error instanceof Error ? error.message : String(error);
+                errorDiv.textContent = 'Failed to load the game. Check console (F12). Error: ' + errorMessage;
+                document.body.appendChild(errorDiv);
+            }
+        };
+
+    </script>
+</body>
+</html>
